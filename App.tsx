@@ -15,95 +15,103 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.MINER);
   const [isLoading, setIsLoading] = useState(true);
   
-  // STATO DEL GIOCO
+  // STATO INIZIALE VUOTO (Verrà riempito al caricamento)
   const [state, setState] = useState<GameState>({
     score: 0,
     energy: MAX_ENERGY,
     scans: 0,
     signals: 0,
-    lastEnergyUpdate: Date.now()
+    lastEnergyUpdate: Date.now() // FONDAMENTALE PER IL CALCOLO OFFLINE
   });
 
   const stateRef = useRef(state); 
 
-  // Mantiene il ref aggiornato per il salvataggio
+  // Mantiene il ref aggiornato per il salvataggio automatico (evita problemi di closure)
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  // FUNZIONE RIGENERAZIONE OFFLINE
-  // Calcola quanta energia hai guadagnato mentre l'app era chiusa
+  // --- FUNZIONE CUORE: CALCOLO RICARICA OFFLINE ---
   const calculateOfflineRegen = (savedState: GameState): number => {
     const now = Date.now();
     const lastUpdate = savedState.lastEnergyUpdate || now;
+    
+    // Calcola quanti secondi sono passati da quando hai chiuso l'app
     const elapsedMs = now - lastUpdate;
     
     if (elapsedMs <= 0) return savedState.energy;
 
-    // 3 punti energia al secondo
+    // 3 punti energia al secondo (Configurazione standard)
     const regeneratedAmount = Math.floor(elapsedMs / REGEN_RATE_MS) * 3; 
+    
+    // Non superare mai il massimo
     return Math.min(MAX_ENERGY, savedState.energy + regeneratedAmount);
   };
 
-  // 1. INIZIALIZZAZIONE INTELLIGENTE
+  // --- 1. INIZIALIZZAZIONE (La parte critica che non andava) ---
   useEffect(() => {
     const initialize = async () => {
       initTelegram();
 
-      // 1. Prima proviamo a caricare dal CLOUD (Telegram) o LOCAL (Browser)
-      // Questa è la fonte più aggiornata se hai appena minato.
-      let savedData: GameState | null = null;
+      let finalState: GameState | null = null;
 
-      // Prova Cloud
-      const cloudData = await getCloudStorage(['TERMINAL_STATE']);
-      if (cloudData['TERMINAL_STATE']) {
+      // A. TENTATIVO 1: CLOUD STORAGE (Il più affidabile su mobile)
+      try {
+        const cloudData = await getCloudStorage(['TERMINAL_STATE']);
+        if (cloudData['TERMINAL_STATE']) {
+          const parsed = JSON.parse(cloudData['TERMINAL_STATE']);
+          if (parsed && typeof parsed.score === 'number') {
+            console.log("✅ Trovato salvataggio Cloud");
+            finalState = parsed;
+          }
+        }
+      } catch (e) { console.error("Errore lettura Cloud", e); }
+
+      // B. TENTATIVO 2: LOCAL STORAGE (Fallback veloce o per PC)
+      if (!finalState) {
         try {
-          savedData = JSON.parse(cloudData['TERMINAL_STATE']);
-          console.log("Caricato da Cloud:", savedData);
-        } catch (e) { console.error("Errore Cloud JSON", e); }
+          const localData = localStorage.getItem('TERMINAL_STATE');
+          if (localData) {
+            const parsed = JSON.parse(localData);
+            if (parsed && typeof parsed.score === 'number') {
+              console.log("✅ Trovato salvataggio Locale");
+              finalState = parsed;
+            }
+          }
+        } catch (e) {}
       }
 
-      // Prova Local (Fallback)
-      if (!savedData) {
-        const localData = localStorage.getItem('TERMINAL_STATE');
-        if (localData) {
-          try {
-            savedData = JSON.parse(localData);
-            console.log("Caricato da Local:", savedData);
-          } catch (e) {}
+      // C. TENTATIVO 3: URL PARAMETERS (Dati dal Bot - Solo se non abbiamo nulla di salvato)
+      // Questo evita che il bot sovrascriva i tuoi progressi con "0" ogni volta che rientri
+      if (!finalState) {
+        const params = new URLSearchParams(window.location.search);
+        const urlScore = params.get('score');
+        
+        if (urlScore) {
+          console.log("⚠️ Nessun salvataggio trovato, uso dati URL dal Bot");
+          finalState = {
+            score: parseInt(urlScore, 10) || 0,
+            energy: parseInt(params.get('energy') || '1000', 10),
+            scans: parseInt(params.get('scans') || '0', 10),
+            signals: parseInt(params.get('signals') || '0', 10),
+            lastEnergyUpdate: Date.now()
+          };
         }
       }
 
-      // 2. Leggiamo i parametri URL (Dati dal Bot)
-      const params = new URLSearchParams(window.location.search);
-      const urlScore = parseInt(params.get('score') || '0', 10);
-      
-      // 3. LOGICA DI CONFLITTO: CHI VINCE?
-      // Se abbiamo dati salvati locali validi e sono "meglio" (più recenti/alti) del bot, usiamo quelli.
-      // Altrimenti usiamo il bot (es. primo avvio su nuovo dispositivo).
-      
-      if (savedData && savedData.lastEnergyUpdate > 0) {
-        // Abbiamo un salvataggio valido. Usiamolo e calcoliamo l'energia offline.
+      // APPLICAZIONE DATI E CALCOLO OFFLINE
+      if (finalState) {
+        // Applica la rigenerazione dell'energia basata sul tempo passato offline
+        const currentEnergy = calculateOfflineRegen(finalState);
+        
         setState({
-          ...savedData,
-          energy: calculateOfflineRegen(savedData),
-          lastEnergyUpdate: Date.now() // Aggiorniamo il timestamp ad adesso
+          ...finalState,
+          energy: currentEnergy,
+          lastEnergyUpdate: Date.now() // Aggiorniamo il timestamp ad ADESSO
         });
-      } 
-      else if (urlScore > 0 || params.get('energy')) {
-        // Non abbiamo salvataggi, ma il bot ci passa dei dati (es. cambio telefono). Usiamo il bot.
-        const urlEnergy = parseInt(params.get('energy') || '1000', 10);
-        setState({
-          score: urlScore,
-          energy: urlEnergy, // Qui non possiamo calcolare regen precisa, ci fidiamo del bot
-          scans: parseInt(params.get('scans') || '0', 10),
-          signals: parseInt(params.get('signals') || '0', 10),
-          lastEnergyUpdate: Date.now()
-        });
-      }
-      else {
-        // Utente nuovo o errore totale: Reset
-        setState(prev => ({ ...prev, lastEnergyUpdate: Date.now() }));
+      } else {
+        // Utente completamente nuovo
+        console.log("🆕 Nuovo Utente");
       }
 
       setIsLoading(false);
@@ -112,7 +120,7 @@ function App() {
     initialize();
   }, []);
 
-  // 2. RIGENERAZIONE ENERGIA (Loop in tempo reale - Mentre giochi)
+  // --- 2. LOOP DI GIOCO (Rigenerazione mentre l'app è aperta) ---
   useEffect(() => {
     if (isLoading) return;
 
@@ -121,7 +129,7 @@ function App() {
         if (prev.energy >= MAX_ENERGY) return prev;
 
         const now = Date.now();
-        // Rigenera solo se è passato 1 secondo dall'ultimo update reale
+        // Rigenera solo se è passato davvero 1 secondo dall'ultimo update
         if (now - prev.lastEnergyUpdate >= 1000) {
            return {
             ...prev,
@@ -136,18 +144,18 @@ function App() {
     return () => clearInterval(regenInterval);
   }, [isLoading]);
 
-  // 3. AUTO-SAVE (Salva ogni 2 secondi)
+  // --- 3. AUTO-SAVE (Salvataggio Silenzioso e Costante) ---
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (isLoading) return; // Non salvare mentre carichiamo!
+    if (isLoading) return;
 
+    const interval = setInterval(() => {
       const currentState = stateRef.current;
       const jsonState = JSON.stringify(currentState);
       
-      // Salva ovunque
-      saveCloudStorage('TERMINAL_STATE', jsonState).then((ok) => {
-         if(ok) console.log("Cloud Save OK");
-      });
+      // Salva su Cloud (Telegram)
+      saveCloudStorage('TERMINAL_STATE', jsonState);
+      
+      // Salva su Local (Backup)
       try { localStorage.setItem('TERMINAL_STATE', jsonState); } catch (e) {}
       
     }, SAVE_INTERVAL_MS);
@@ -155,7 +163,7 @@ function App() {
     return () => clearInterval(interval);
   }, [isLoading]);
 
-  // 4. HANDLERS
+  // --- AZIONI ---
   const handleMine = () => {
     setState(prev => {
       if (prev.energy < 10) return prev;
@@ -163,7 +171,7 @@ function App() {
         ...prev,
         score: prev.score + 5,
         energy: prev.energy - 10,
-        lastEnergyUpdate: Date.now()
+        lastEnergyUpdate: Date.now() // Importante aggiornare il timestamp ad ogni azione
       };
     });
   };
@@ -180,7 +188,12 @@ function App() {
         lastEnergyUpdate: Date.now()
       };
 
-      // Sync immediato con il Bot
+      // Sync immediato con il Bot (consegna prodotto)
+      // Nota: salviamo anche localmente prima di inviare per sicurezza
+      const jsonState = JSON.stringify(newState);
+      saveCloudStorage('TERMINAL_STATE', jsonState);
+      localStorage.setItem('TERMINAL_STATE', jsonState);
+
       sendDataToBot({
         action: 'sync',
         score: newState.score,
@@ -198,7 +211,7 @@ function App() {
       <div className="flex items-center justify-center h-screen bg-[#050505] text-[#39ff14]">
         <div className="space-y-4 text-center">
           <div className="w-12 h-12 border-4 border-[#39ff14] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="font-mono text-sm animate-pulse">INITIALIZING $CAP TERMINAL...</p>
+          <p className="font-mono text-sm animate-pulse">LOADING TERMINAL DATA...</p>
         </div>
       </div>
     );
@@ -215,26 +228,15 @@ function App() {
       </div>
 
       <nav className="h-20 glass-panel border-t border-[#39ff14]/20 flex justify-around items-center px-2 pb-2 relative z-20 bg-black/80 backdrop-blur-md">
-        <button 
-          onClick={() => setActiveTab(Tab.MINER)}
-          className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.MINER ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}
-        >
+        <button onClick={() => setActiveTab(Tab.MINER)} className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.MINER ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}>
           <Pickaxe size={24} />
           <span className="text-[10px] font-mono tracking-wider">MINE</span>
         </button>
-
-        <button 
-          onClick={() => setActiveTab(Tab.WALLET)}
-          className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.WALLET ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}
-        >
+        <button onClick={() => setActiveTab(Tab.WALLET)} className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.WALLET ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}>
           <WalletIcon size={24} />
           <span className="text-[10px] font-mono tracking-wider">WALLET</span>
         </button>
-
-        <button 
-          onClick={() => setActiveTab(Tab.SHOP)}
-          className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.SHOP ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}
-        >
+        <button onClick={() => setActiveTab(Tab.SHOP)} className={`flex flex-col items-center gap-1 p-2 w-16 transition-all ${activeTab === Tab.SHOP ? 'text-[#39ff14] scale-110 drop-shadow-[0_0_8px_rgba(57,255,20,0.5)]' : 'text-gray-500'}`}>
           <ShoppingBag size={24} />
           <span className="text-[10px] font-mono tracking-wider">SHOP</span>
         </button>
