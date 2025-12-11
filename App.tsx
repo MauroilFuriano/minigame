@@ -9,14 +9,14 @@ import { Pickaxe, Wallet as WalletIcon, ShoppingBag } from 'lucide-react';
 
 const SAVE_INTERVAL_MS = 2000;
 const MAX_ENERGY = 1000;
-const REGEN_RATE_MS = 1000;
+const REGEN_RATE_MS = 1000; 
 const ENERGY_PER_TICK = 3;
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.MINER);
   const [isLoading, setIsLoading] = useState(true);
   
-  // Stato predefinito
+  // Stato predefinito (vuoto)
   const [state, setState] = useState<GameState>({
     score: 0,
     energy: MAX_ENERGY,
@@ -31,7 +31,7 @@ function App() {
     stateRef.current = state;
   }, [state]);
 
-  // --- CALCOLO RIGENERAZIONE OFFLINE ---
+  // --- CALCOLO RIGENERAZIONE OFFLINE (Energia guadagnata a app chiusa) ---
   const applyOfflineRegen = (baseState: GameState): GameState => {
     const now = Date.now();
     const lastUpdate = baseState.lastEnergyUpdate || now;
@@ -41,9 +41,11 @@ function App() {
       return { ...baseState, lastEnergyUpdate: now };
     }
 
-    // Calcola l'energia guadagnata mentre eri via
+    // Calcola l'energia guadagnata mentre eri offline
     const secondsElapsed = Math.floor(elapsedMs / REGEN_RATE_MS);
     const energyGained = secondsElapsed * ENERGY_PER_TICK;
+    
+    // La nuova energia non può superare 1000
     const newEnergy = Math.min(MAX_ENERGY, baseState.energy + energyGained);
 
     console.log(`⚡ Offline Regen: +${energyGained} energy in ${secondsElapsed}s`);
@@ -55,81 +57,79 @@ function App() {
     };
   };
 
-  // --- 1. INIZIALIZZAZIONE SMART (IL FIX) ---
+  // --- 1. INIZIALIZZAZIONE SMART ---
   useEffect(() => {
     const initializeGame = async () => {
       initTelegram();
 
-      // A. Dati dal BOT (URL) - Spesso vecchi ("0")
+      // A. Dati dal LINK DEL BOT (URL)
       const params = new URLSearchParams(window.location.search);
-      const botState: Partial<GameState> = {
-        score: parseInt(params.get('score') || '0', 10),
-        energy: parseInt(params.get('energy') || '1000', 10),
-        scans: parseInt(params.get('scans') || '0', 10),
-        signals: parseInt(params.get('signals') || '0', 10),
-        lastEnergyUpdate: Date.now()
-      };
+      const urlScoreParam = params.get('score');
+      // Se il parametro c'è, è un numero. Se non c'è (grazie alla modifica Python), è null.
+      const urlScore = urlScoreParam ? parseInt(urlScoreParam, 10) : null;
 
-      console.log("🤖 Bot State:", botState);
-
-      // B. Dati LOCALI (Cloud/Browser) - Spesso nuovi
+      // B. Dati SALVATI (Cloud Telegram + LocalStorage)
       let storedState: GameState | null = null;
 
-      // 1. Prova Cloud Telegram
+      // 1. Prova Cloud (Priorità massima su Telegram Mobile)
       try {
         const cloud = await getCloudStorage(['TERMINAL_STATE']);
         if (cloud['TERMINAL_STATE']) {
           storedState = JSON.parse(cloud['TERMINAL_STATE']);
-          console.log("☁️ Trovato Cloud Save");
+          console.log("☁️ Trovato Cloud Save:", storedState);
         }
       } catch (e) { console.error(e); }
 
-      // 2. Fallback Local Storage
+      // 2. Prova Local (Backup per PC/Browser)
       if (!storedState) {
         try {
           const local = localStorage.getItem('TERMINAL_STATE');
           if (local) {
             storedState = JSON.parse(local);
-            console.log("💾 Trovato Local Save");
+            console.log("💾 Trovato Local Save:", storedState);
           }
         } catch (e) {}
       }
 
-      // C. LOGICA DI CONFLITTO: CHI VINCE?
+      // C. IL CONFLITTO: CHI VINCE?
       let winningState: GameState;
 
-      if (storedState) {
-        const localScore = storedState.score || 0;
-        const botScore = botState.score || 0;
-
-        // SE il punteggio locale è MAGGIORE o UGUALE a quello del bot, VINCE IL LOCALE.
-        // Questo impedisce che il bot (che invia 0) resetti i tuoi progressi.
-        if (localScore >= botScore) {
-          console.log("✅ VINCE IL LOCALE (Punteggio più alto o uguale)");
+      // CASO 1: Il Bot ha mandato dati espliciti (> 0)
+      if (urlScore !== null && urlScore > 0) {
+        // Se il salvataggio locale è PIÙ ALTO del bot, usiamo il locale (abbiamo giocato offline)
+        if (storedState && storedState.score > urlScore) {
+           console.log("🏆 Locale vince (Score più alto)");
+           winningState = storedState;
+        } else {
+           // Altrimenti ci fidiamo del bot (es. acquisto fatto su altro PC)
+           console.log("⚠️ Bot vince (Dati URL prioritari)");
+           winningState = {
+             score: urlScore,
+             energy: parseInt(params.get('energy') || '1000', 10),
+             scans: parseInt(params.get('scans') || '0', 10),
+             signals: parseInt(params.get('signals') || '0', 10),
+             lastEnergyUpdate: Date.now()
+           };
+        }
+      }
+      // CASO 2: Il Bot NON ha mandato dati (il link è pulito grazie al fix Python)
+      else {
+        if (storedState) {
+          console.log("✅ Bot silenzioso -> Uso Salvataggio Cloud/Local");
           winningState = storedState;
         } else {
-          console.log("⚠️ VINCE IL BOT (Punteggio bot molto più alto, forse altro device)");
-          // Usiamo i dati del bot ma manteniamo il timestamp locale per evitare bug
+          console.log("🆕 Nuovo Utente (Zero assoluto)");
           winningState = {
-            score: botScore,
-            energy: botState.energy || MAX_ENERGY,
-            scans: botState.scans || 0,
-            signals: botState.signals || 0,
+            score: 0,
+            energy: MAX_ENERGY,
+            scans: 0,
+            signals: 0,
             lastEnergyUpdate: Date.now()
           };
         }
-      } else {
-        console.log("🆕 Nuovo Utente (Nessun dato locale)");
-        winningState = {
-            score: botState.score || 0,
-            energy: botState.energy || MAX_ENERGY,
-            scans: botState.scans || 0,
-            signals: botState.signals || 0,
-            lastEnergyUpdate: Date.now()
-        };
       }
 
-      // D. Applica rigenerazione energia al vincitore
+      // D. Applica la rigenerazione dell'energia al vincitore
       const finalState = applyOfflineRegen(winningState);
       
       setState(finalState);
@@ -139,7 +139,7 @@ function App() {
     initializeGame();
   }, []);
 
-  // --- 2. RIGENERAZIONE LIVE ---
+  // --- 2. LOOP DI GIOCO (Rigenerazione Live) ---
   useEffect(() => {
     if (isLoading) return;
 
@@ -148,6 +148,7 @@ function App() {
         if (prev.energy >= MAX_ENERGY) return prev;
 
         const now = Date.now();
+        // Rigenera solo se è passato 1 secondo
         if (now - prev.lastEnergyUpdate >= REGEN_RATE_MS) {
           return {
             ...prev,
@@ -162,7 +163,7 @@ function App() {
     return () => clearInterval(regenInterval);
   }, [isLoading]);
 
-  // --- 3. AUTO-SAVE ---
+  // --- 3. AUTO-SAVE (Fondamentale) ---
   useEffect(() => {
     if (isLoading) return;
 
@@ -170,9 +171,9 @@ function App() {
       const currentState = stateRef.current;
       const jsonState = JSON.stringify(currentState);
       
-      // Salva su entrambi per sicurezza
-      localStorage.setItem('TERMINAL_STATE', jsonState);
-      saveCloudStorage('TERMINAL_STATE', jsonState);
+      // Salva OVUNQUE (Ridondanza totale)
+      saveCloudStorage('TERMINAL_STATE', jsonState); // Telegram Cloud
+      localStorage.setItem('TERMINAL_STATE', jsonState); // Browser Local
       
     }, SAVE_INTERVAL_MS);
 
@@ -205,12 +206,12 @@ function App() {
         lastEnergyUpdate: Date.now()
       };
       
-      // SALVATAGGIO FORZATO
+      // Salva subito prima di chiudere
       const jsonState = JSON.stringify(newState);
-      localStorage.setItem('TERMINAL_STATE', jsonState);
       saveCloudStorage('TERMINAL_STATE', jsonState);
+      localStorage.setItem('TERMINAL_STATE', jsonState);
 
-      // SYNC COL BOT
+      // Invia al bot
       sendDataToBot({
         action: 'sync',
         score: newState.score,
@@ -228,8 +229,8 @@ function App() {
       <div className="flex items-center justify-center h-screen bg-[#050505] text-[#39ff14]">
         <div className="space-y-4 text-center">
           <div className="w-12 h-12 border-4 border-[#39ff14] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          {/* SE NON VEDI "VERSIONE 2.0" ALLORA NON HAI AGGIORNATO */}
-          <p className="font-mono text-sm animate-pulse">VERSIONE 2.0 - CARICAMENTO...</p>
+          {/* SCRITTA PER CONFERMARE L'AGGIORNAMENTO */}
+          <p className="font-mono text-sm animate-pulse">SYNCING NEURAL LINK v3.0...</p>
         </div>
       </div>
     );
