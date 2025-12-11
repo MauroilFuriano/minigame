@@ -9,13 +9,14 @@ import { Pickaxe, Wallet as WalletIcon, ShoppingBag } from 'lucide-react';
 
 const SAVE_INTERVAL_MS = 2000;
 const MAX_ENERGY = 1000;
-const REGEN_RATE_MS = 1000; 
+const REGEN_RATE_MS = 1000;
+const ENERGY_PER_TICK = 3;
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.MINER);
   const [isLoading, setIsLoading] = useState(true);
   
-  // Stato iniziale di default
+  // Default Initial State
   const [state, setState] = useState<GameState>({
     score: 0,
     energy: MAX_ENERGY,
@@ -24,138 +25,182 @@ function App() {
     lastEnergyUpdate: Date.now()
   });
 
-  const stateRef = useRef(state); 
+  // Reference for Auto-Save to avoid stale closures
+  const stateRef = useRef(state);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
-  // FUNZIONE RIGENERAZIONE OFFLINE
-  const calculateOfflineRegen = (savedState: GameState): number => {
+  // --- HELPER: OFFLINE REGENERATION ---
+  const applyOfflineRegen = (baseState: GameState): GameState => {
     const now = Date.now();
-    const lastUpdate = savedState.lastEnergyUpdate || now;
+    const lastUpdate = baseState.lastEnergyUpdate || now;
     const elapsedMs = now - lastUpdate;
-    
-    if (elapsedMs <= 0) return savedState.energy;
 
-    // 3 punti energia al secondo
-    const regeneratedAmount = Math.floor(elapsedMs / REGEN_RATE_MS) * 3; 
-    return Math.min(MAX_ENERGY, savedState.energy + regeneratedAmount);
+    if (elapsedMs <= 0) {
+      return { ...baseState, lastEnergyUpdate: now };
+    }
+
+    // Calculate gained energy
+    const secondsElapsed = Math.floor(elapsedMs / REGEN_RATE_MS);
+    const energyGained = secondsElapsed * ENERGY_PER_TICK;
+    const newEnergy = Math.min(MAX_ENERGY, baseState.energy + energyGained);
+
+    console.log(`⚡ Offline Regen: ${secondsElapsed}s elapsed, +${energyGained} energy.`);
+
+    return {
+      ...baseState,
+      energy: newEnergy,
+      lastEnergyUpdate: now
+    };
   };
 
-  // --- 1. INIZIALIZZAZIONE INTELLIGENTE ---
+  // --- 1. SMART INITIALIZATION ---
   useEffect(() => {
-    const initialize = async () => {
+    const initializeGame = async () => {
       initTelegram();
 
-      // 1. Dati dal BOT (URL) - Spesso sono vecchi se non hai fatto sync
+      // A. Fetch URL Parameters (Bot Data - Potential Stale)
       const params = new URLSearchParams(window.location.search);
-      const botScore = parseInt(params.get('score') || '0', 10);
-      const botEnergy = parseInt(params.get('energy') || '1000', 10);
-      const botScans = parseInt(params.get('scans') || '0', 10);
-      const botSignals = parseInt(params.get('signals') || '0', 10);
+      const botState: Partial<GameState> = {
+        score: parseInt(params.get('score') || '0', 10),
+        energy: parseInt(params.get('energy') || '1000', 10),
+        scans: parseInt(params.get('scans') || '0', 10),
+        signals: parseInt(params.get('signals') || '0', 10),
+        lastEnergyUpdate: Date.now() // Bot doesn't send time, assume "now" if used
+      };
 
-      // 2. Dati LOCALI (Cloud/Storage) - Questi sono i più freschi
-      let localState: GameState | null = null;
-      
-      // Prova Cloud Telegram
+      console.log("🤖 Bot State:", botState);
+
+      // B. Fetch Local/Cloud Storage (Potential Fresh Data)
+      let storedState: GameState | null = null;
+
+      // 1. Try Cloud Storage
       try {
         const cloud = await getCloudStorage(['TERMINAL_STATE']);
         if (cloud['TERMINAL_STATE']) {
-            localState = JSON.parse(cloud['TERMINAL_STATE']);
-            console.log("✅ Trovato Cloud Save");
+          storedState = JSON.parse(cloud['TERMINAL_STATE']);
+          console.log("☁️ Cloud Save Found");
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error("Cloud fetch failed", e);
+      }
 
-      // Prova LocalStorage Browser (Fallback)
-      if (!localState) {
+      // 2. Fallback to Local Storage if Cloud failed or empty
+      if (!storedState) {
         try {
           const local = localStorage.getItem('TERMINAL_STATE');
           if (local) {
-              localState = JSON.parse(local);
-              console.log("✅ Trovato Local Save");
+            storedState = JSON.parse(local);
+            console.log("💾 Local Save Found");
           }
-        } catch (e) {}
+        } catch (e) {
+          console.error("Local fetch failed", e);
+        }
       }
 
-      // 3. LOGICA "CHI VINCE?"
-      let finalState: GameState;
+      // C. DECISION LOGIC: Resolving Conflicts
+      let winningState: GameState;
 
-      // Se abbiamo dati locali validi...
-      if (localState && typeof localState.score === 'number') {
-        // ...e se il punteggio locale è MAGGIORE o UGUALE a quello del bot...
-        // ...allora usiamo il locale (perché significa che abbiamo giocato offline)
-        if (localState.score >= botScore) {
-            console.log("🏆 Vincono i dati LOCALI (Più recenti)");
-            finalState = {
-                ...localState,
-                // Applica rigenerazione energia
-                energy: calculateOfflineRegen(localState),
-                lastEnergyUpdate: Date.now()
-            };
+      if (storedState) {
+        // LOGIC: If we have stored data, we prefer it IF it looks newer or has equal/better progress.
+        // Since Bot doesn't send timestamps, we rely mainly on Score comparison.
+        // If Local Score >= Bot Score, we assume Local is the latest session.
+        // If Bot Score >> Local Score, it implies user played on another device (and local is stale).
+        
+        const localScore = storedState.score || 0;
+        const botScore = botState.score || 0;
+
+        if (localScore >= botScore) {
+          console.log("✅ Using LOCAL STATE (Score is higher or equal to Bot)");
+          winningState = storedState;
         } else {
-            // Se il bot ha PIÙ punti del locale (es. acquisto fatto da un altro device), vince il bot
-            console.log("⚠️ Vincono i dati BOT (Nuovo device o acquisto esterno)");
-            finalState = {
-                score: botScore,
-                energy: botEnergy,
-                scans: botScans,
-                signals: botSignals,
-                lastEnergyUpdate: Date.now()
-            };
+          console.log("⚠️ Using BOT STATE (Bot score is higher, likely new device sync)");
+          // Merge bot stats but keep local timestamp to avoid huge jumps if inconsistent
+          winningState = {
+            score: botScore,
+            energy: botState.energy || MAX_ENERGY,
+            scans: botState.scans || 0,
+            signals: botState.signals || 0,
+            lastEnergyUpdate: Date.now()
+          };
         }
       } else {
-        // Nessun dato locale? Usiamo il bot (Primo avvio)
-        console.log("🆕 Primo Avvio / Nessun dato locale");
-        finalState = {
-            score: botScore,
-            energy: botEnergy,
-            scans: botScans,
-            signals: botSignals,
+        console.log("🆕 No Local Data - initializing from BOT");
+        winningState = {
+            score: botState.score || 0,
+            energy: botState.energy || MAX_ENERGY,
+            scans: botState.scans || 0,
+            signals: botState.signals || 0,
             lastEnergyUpdate: Date.now()
         };
       }
 
+      // D. Apply Offline Regeneration to the winner
+      const finalState = applyOfflineRegen(winningState);
+      
       setState(finalState);
       setIsLoading(false);
     };
 
-    initialize();
+    initializeGame();
   }, []);
 
-  // --- 2. LOOP RIGENERAZIONE LIVE ---
+  // --- 2. LIVE ENERGY REGENERATION ---
   useEffect(() => {
     if (isLoading) return;
-    const interval = setInterval(() => {
+
+    const regenInterval = setInterval(() => {
       setState(prev => {
         if (prev.energy >= MAX_ENERGY) return prev;
+
         const now = Date.now();
-        if (now - prev.lastEnergyUpdate >= 1000) {
-           return { ...prev, energy: Math.min(MAX_ENERGY, prev.energy + 3), lastEnergyUpdate: now };
+        // Only add energy if 1 second has passed since last update
+        if (now - prev.lastEnergyUpdate >= REGEN_RATE_MS) {
+          return {
+            ...prev,
+            energy: Math.min(MAX_ENERGY, prev.energy + ENERGY_PER_TICK),
+            lastEnergyUpdate: now
+          };
         }
         return prev;
       });
     }, 1000);
-    return () => clearInterval(interval);
+
+    return () => clearInterval(regenInterval);
   }, [isLoading]);
 
-  // --- 3. AUTO-SAVE COSTANTE ---
+  // --- 3. AUTO-SAVE SYSTEM ---
   useEffect(() => {
     if (isLoading) return;
-    const interval = setInterval(() => {
-      const json = JSON.stringify(stateRef.current);
-      // Salva su entrambi per sicurezza massima
-      saveCloudStorage('TERMINAL_STATE', json);
-      localStorage.setItem('TERMINAL_STATE', json);
+
+    const saveInterval = setInterval(() => {
+      const currentState = stateRef.current;
+      const jsonState = JSON.stringify(currentState);
+      
+      // Save to LocalStorage (Fast)
+      localStorage.setItem('TERMINAL_STATE', jsonState);
+      
+      // Save to CloudStorage (Async/Network)
+      saveCloudStorage('TERMINAL_STATE', jsonState);
+      
     }, SAVE_INTERVAL_MS);
-    return () => clearInterval(interval);
+
+    return () => clearInterval(saveInterval);
   }, [isLoading]);
 
-  // --- HANDLERS ---
+  // --- ACTIONS ---
+
   const handleMine = () => {
     setState(prev => {
       if (prev.energy < 10) return prev;
-      return { ...prev, score: prev.score + 5, energy: prev.energy - 10, lastEnergyUpdate: Date.now() };
+      return {
+        ...prev,
+        score: prev.score + 5,
+        energy: prev.energy - 10,
+        lastEnergyUpdate: Date.now() // Update time on action to prevent double-regen
+      };
     });
   };
 
@@ -171,12 +216,12 @@ function App() {
         lastEnergyUpdate: Date.now()
       };
       
-      // Salva IMMEDIATAMENTE prima di chiudere
-      const json = JSON.stringify(newState);
-      saveCloudStorage('TERMINAL_STATE', json);
-      localStorage.setItem('TERMINAL_STATE', json);
+      // FORCE SAVE IMMEDIATELY
+      const jsonState = JSON.stringify(newState);
+      localStorage.setItem('TERMINAL_STATE', jsonState);
+      saveCloudStorage('TERMINAL_STATE', jsonState);
 
-      // Invia al bot e chiudi
+      // SYNC TO BOT
       sendDataToBot({
         action: 'sync',
         score: newState.score,
@@ -184,16 +229,18 @@ function App() {
         scans: newState.scans,
         signals: newState.signals
       });
+
       return newState;
     });
   };
 
+  // --- RENDER ---
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-screen bg-[#050505] text-[#39ff14]">
         <div className="space-y-4 text-center">
           <div className="w-12 h-12 border-4 border-[#39ff14] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          <p className="font-mono text-sm animate-pulse">INITIALIZING NEURAL LINK...</p>
+          <p className="font-mono text-sm animate-pulse">SYNCING NEURAL LINK...</p>
         </div>
       </div>
     );
