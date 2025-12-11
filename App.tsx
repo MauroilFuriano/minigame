@@ -16,7 +16,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.MINER);
   const [isLoading, setIsLoading] = useState(true);
   
-  // Stato predefinito (vuoto)
+  // STATO PREDEFINITO (Vuoto)
   const [state, setState] = useState<GameState>({
     score: 0,
     energy: MAX_ENERGY,
@@ -31,7 +31,8 @@ function App() {
     stateRef.current = state;
   }, [state]);
 
-  // --- CALCOLO RIGENERAZIONE OFFLINE (Energia guadagnata a app chiusa) ---
+  // --- CALCOLO RIGENERAZIONE OFFLINE ---
+  // Aggiunge l'energia guadagnata mentre l'app era chiusa
   const applyOfflineRegen = (baseState: GameState): GameState => {
     const now = Date.now();
     const lastUpdate = baseState.lastEnergyUpdate || now;
@@ -41,14 +42,13 @@ function App() {
       return { ...baseState, lastEnergyUpdate: now };
     }
 
-    // Calcola l'energia guadagnata mentre eri offline
     const secondsElapsed = Math.floor(elapsedMs / REGEN_RATE_MS);
     const energyGained = secondsElapsed * ENERGY_PER_TICK;
     
-    // La nuova energia non può superare 1000
+    // Non superare il massimo
     const newEnergy = Math.min(MAX_ENERGY, baseState.energy + energyGained);
 
-    console.log(`⚡ Offline Regen: +${energyGained} energy in ${secondsElapsed}s`);
+    console.log(`⚡ Offline: +${energyGained} energy in ${secondsElapsed}s`);
 
     return {
       ...baseState,
@@ -57,52 +57,50 @@ function App() {
     };
   };
 
-  // --- 1. INIZIALIZZAZIONE SMART ---
+  // --- 1. INIZIALIZZAZIONE INTELLIGENTE ---
   useEffect(() => {
     const initializeGame = async () => {
       initTelegram();
 
-      // A. Dati dal LINK DEL BOT (URL)
+      // A. Dati dal LINK (URL)
       const params = new URLSearchParams(window.location.search);
       const urlScoreParam = params.get('score');
-      // Se il parametro c'è, è un numero. Se non c'è (grazie alla modifica Python), è null.
       const urlScore = urlScoreParam ? parseInt(urlScoreParam, 10) : null;
 
-      // B. Dati SALVATI (Cloud Telegram + LocalStorage)
+      // B. Cerca dati salvati (CLOUD ha la priorità su Telegram)
       let storedState: GameState | null = null;
 
-      // 1. Prova Cloud (Priorità massima su Telegram Mobile)
+      // 1. Prova Cloud Telegram (Fondamentale per Mobile)
       try {
         const cloud = await getCloudStorage(['TERMINAL_STATE']);
         if (cloud['TERMINAL_STATE']) {
           storedState = JSON.parse(cloud['TERMINAL_STATE']);
-          console.log("☁️ Trovato Cloud Save:", storedState);
+          console.log("☁️ CLOUD SAVE TROVATO:", storedState);
         }
-      } catch (e) { console.error(e); }
+      } catch (e) { console.error("Errore Cloud:", e); }
 
-      // 2. Prova Local (Backup per PC/Browser)
+      // 2. Prova LocalStorage (Backup per PC/Browser)
       if (!storedState) {
         try {
           const local = localStorage.getItem('TERMINAL_STATE');
           if (local) {
             storedState = JSON.parse(local);
-            console.log("💾 Trovato Local Save:", storedState);
+            console.log("💾 LOCAL SAVE TROVATO:", storedState);
           }
         } catch (e) {}
       }
 
-      // C. IL CONFLITTO: CHI VINCE?
+      // C. CHI VINCE? (Logica Anti-Reset)
       let winningState: GameState;
 
-      // CASO 1: Il Bot ha mandato dati espliciti (> 0)
+      // CASO 1: Il Bot ha mandato dati (> 0) nel link
       if (urlScore !== null && urlScore > 0) {
-        // Se il salvataggio locale è PIÙ ALTO del bot, usiamo il locale (abbiamo giocato offline)
+        // Usiamo il bot, MA se il salvataggio Cloud è migliore, usiamo Cloud!
         if (storedState && storedState.score > urlScore) {
-           console.log("🏆 Locale vince (Score più alto)");
+           console.log("🏆 CLOUD VINCE (Score più alto del link)");
            winningState = storedState;
         } else {
-           // Altrimenti ci fidiamo del bot (es. acquisto fatto su altro PC)
-           console.log("⚠️ Bot vince (Dati URL prioritari)");
+           console.log("⚠️ LINK VINCE (Dati URL prioritari)");
            winningState = {
              score: urlScore,
              energy: parseInt(params.get('energy') || '1000', 10),
@@ -112,13 +110,13 @@ function App() {
            };
         }
       }
-      // CASO 2: Il Bot NON ha mandato dati (il link è pulito grazie al fix Python)
+      // CASO 2: Il link è vuoto o zero (Grazie al fix Python)
       else {
         if (storedState) {
-          console.log("✅ Bot silenzioso -> Uso Salvataggio Cloud/Local");
+          console.log("✅ LINK VUOTO -> RECUPERO DA CLOUD");
           winningState = storedState;
         } else {
-          console.log("🆕 Nuovo Utente (Zero assoluto)");
+          console.log("🆕 NUOVO UTENTE (Nessun dato ovunque)");
           winningState = {
             score: 0,
             energy: MAX_ENERGY,
@@ -129,7 +127,7 @@ function App() {
         }
       }
 
-      // D. Applica la rigenerazione dell'energia al vincitore
+      // D. Applica rigenerazione energia al vincitore
       const finalState = applyOfflineRegen(winningState);
       
       setState(finalState);
@@ -139,7 +137,7 @@ function App() {
     initializeGame();
   }, []);
 
-  // --- 2. LOOP DI GIOCO (Rigenerazione Live) ---
+  // --- 2. LOOP RIGENERAZIONE LIVE (Mentre giochi) ---
   useEffect(() => {
     if (isLoading) return;
 
@@ -148,7 +146,6 @@ function App() {
         if (prev.energy >= MAX_ENERGY) return prev;
 
         const now = Date.now();
-        // Rigenera solo se è passato 1 secondo
         if (now - prev.lastEnergyUpdate >= REGEN_RATE_MS) {
           return {
             ...prev,
@@ -171,9 +168,9 @@ function App() {
       const currentState = stateRef.current;
       const jsonState = JSON.stringify(currentState);
       
-      // Salva OVUNQUE (Ridondanza totale)
+      // Salva su ENTRAMBI per sicurezza massima
       saveCloudStorage('TERMINAL_STATE', jsonState); // Telegram Cloud
-      localStorage.setItem('TERMINAL_STATE', jsonState); // Browser Local
+      localStorage.setItem('TERMINAL_STATE', jsonState); // Local Backup
       
     }, SAVE_INTERVAL_MS);
 
@@ -206,7 +203,7 @@ function App() {
         lastEnergyUpdate: Date.now()
       };
       
-      // Salva subito prima di chiudere
+      // Salva subito prima di sincronizzare
       const jsonState = JSON.stringify(newState);
       saveCloudStorage('TERMINAL_STATE', jsonState);
       localStorage.setItem('TERMINAL_STATE', jsonState);
@@ -229,8 +226,8 @@ function App() {
       <div className="flex items-center justify-center h-screen bg-[#050505] text-[#39ff14]">
         <div className="space-y-4 text-center">
           <div className="w-12 h-12 border-4 border-[#39ff14] border-t-transparent rounded-full animate-spin mx-auto"></div>
-          {/* SCRITTA PER CONFERMARE L'AGGIORNAMENTO */}
-          <p className="font-mono text-sm animate-pulse">SYNCING NEURAL LINK v3.0...</p>
+          {/* SE VEDI QUESTA SCRITTA, SEI SULLA VERSIONE CORRETTA */}
+          <p className="font-mono text-sm animate-pulse">CONNECTING TO CLOUD...</p>
         </div>
       </div>
     );

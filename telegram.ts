@@ -1,24 +1,34 @@
 import { GameState } from '../types';
 
+// Accesso sicuro all'oggetto Telegram
 const TG = window.Telegram?.WebApp;
 
 export const initTelegram = () => {
   if (TG) {
-    TG.ready();
-    TG.expand();
-    // Imposta colori scuri per evitare flash bianchi durante il caricamento
-    TG.setHeaderColor('#050505');
-    TG.setBackgroundColor('#050505');
-    // Chiede conferma prima di chiudere (evita chiusure accidentali)
-    TG.enableClosingConfirmation();
+    try {
+      TG.ready();
+      TG.expand();
+      
+      // Imposta i colori per evitare flash bianchi
+      TG.setHeaderColor('#050505');
+      TG.setBackgroundColor('#050505');
+      
+      // Abilita la conferma di chiusura (importante per evitare chiusure per sbaglio)
+      if (TG.enableClosingConfirmation) {
+        TG.enableClosingConfirmation();
+      }
+    } catch (e) {
+      console.error("Errore inizializzazione Telegram:", e);
+    }
   }
 };
 
+// --- LEGGE DAL CLOUD (Con fallback su Locale) ---
 export const getCloudStorage = (keys: string[]): Promise<Record<string, string>> => {
   return new Promise((resolve) => {
-    // Caso 1: Non siamo su Telegram (Browser PC) -> Usa LocalStorage
+    // 1. Se non siamo su Telegram, usa il LocalStorage (Browser PC)
     if (!TG || !TG.CloudStorage) {
-      console.log('CloudStorage non disponibile. Uso LocalStorage.');
+      console.log('Browser Mode: Uso LocalStorage');
       const result: Record<string, string> = {};
       keys.forEach(key => {
         const item = localStorage.getItem(key);
@@ -28,60 +38,69 @@ export const getCloudStorage = (keys: string[]): Promise<Record<string, string>>
       return;
     }
 
-    // Caso 2: Siamo su Telegram -> Chiedi al Cloud
+    // 2. Siamo su Telegram: Proviamo a leggere dal Cloud
     try {
       TG.CloudStorage.getItems(keys, (err, values) => {
         if (err) {
-          console.error('Errore lettura Cloud:', err);
-          // Se il cloud fallisce, non ritornare nulla, App.tsx userà il fallback locale
-          resolve({}); 
+          console.error('ERRORE LETTURA CLOUD:', err);
+          // Se il cloud fallisce, prova a recuperare dal LocalStorage come ultima spiaggia
+          const result: Record<string, string> = {};
+          keys.forEach(key => {
+            const item = localStorage.getItem(key);
+            if (item) result[key] = item;
+          });
+          resolve(result);
         } else {
+          console.log('SUCCESSO CLOUD:', values);
           resolve(values || {});
         }
       });
     } catch (e) {
-      console.error('Eccezione CloudStorage:', e);
+      console.error('ECCEZIONE CLOUD:', e);
       resolve({});
     }
   });
 };
 
+// --- SALVA SUL CLOUD (Doppio salvataggio) ---
 export const saveCloudStorage = (key: string, value: string): Promise<boolean> => {
   return new Promise((resolve) => {
-    // 1. SALVATAGGIO LOCALE (Backup immediato e veloce)
+    // 1. SALVA SEMPRE IN LOCALE (Backup istantaneo)
     try {
       localStorage.setItem(key, value);
     } catch (e) {
-      console.error('Errore salvataggio locale:', e);
+      console.error('Errore LocalStorage:', e);
     }
 
-    // 2. SALVATAGGIO CLOUD (Telegram)
+    // 2. Se non c'è Telegram, abbiamo finito
     if (!TG || !TG.CloudStorage) {
-      resolve(true); // Se siamo su PC, consideralo salvato
+      resolve(true);
       return;
     }
 
+    // 3. SALVA SU TELEGRAM CLOUD
     try {
       TG.CloudStorage.setItem(key, value, (err, posted) => {
         if (err) {
-          console.error('Errore salvataggio Cloud:', err);
-          resolve(false);
+          console.error('ERRORE SALVATAGGIO CLOUD:', err);
+          resolve(false); // Segnala che il cloud ha fallito
         } else {
-          resolve(posted);
+          resolve(posted); // Segnala successo
         }
       });
     } catch (e) {
-      console.error('Eccezione salvataggio Cloud:', e);
+      console.error('ECCEZIONE SALVATAGGIO CLOUD:', e);
       resolve(false);
     }
   });
 };
 
+// Invia dati al bot (per acquisti o sync forzato)
 export const sendDataToBot = (data: any) => {
   if (TG) {
     TG.sendData(JSON.stringify(data));
   } else {
-    console.log('Simulazione invio dati al bot:', data);
+    console.log('Mock SendData (Browser):', data);
   }
 };
 
